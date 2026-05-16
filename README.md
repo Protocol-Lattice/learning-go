@@ -1,164 +1,149 @@
 
+# 🚀 Go Interview Preparation Guide
 
-- **Concurrency** is a technique for managing multiple tasks that are executed in an interleaved manner (on a single processor).
-- **Parallelism** is executing multiple tasks truly at the same time (on multiple cores or processors).
-- The **goroutine** stack weighs at least 2 KB of memory, while OS threads weigh about several MB of memory. The goroutine stack is dynamic and can grow and shrink.
+A comprehensive guide for Go developers preparing for interviews, covering core concepts, language fundamentals, and system design.
 
-- **Goroutines** communicate with each other via **channels**
-  - Channels can be **buffered** or **unbuffered**
-    - **Unbuffered** channels enforce a synchronous hand-off (send and receive both block until the other side is ready)
-    - **buffered** channels queue up to cap(ch) values so sends block only when full and receives block only when empty.
-- The **M:N scheduler** maps **M goroutines** onto **N OS threads**.
-  - Each thread has a processor, and that processor has a local queue.
-  - If the local queue is empty → the scheduler steals work from other queues to balance the load.
-  - If the local queues are full → goroutines go to the global queue..
-- **Waitgroup** synchronizes work of many goroutine, It waits for completion every each of them before proceeding further.
-- **Mutex** prevents race condition - situation where many goroutines try to access shared variable, try to access critical section of the code.
-  - Only one goroutine can access critical section of the code. 
-- **sync.RWMutex** is a read–write lock: many goroutines can hold the read lock concurrently (RLock/RUnlock), but the write lock (Lock/Unlock) is exclusive and blocks both readers and writers.
+---
 
-      
- ### Garbage Collector
-- Starts with all objects marked as **white**.  
-- **Roots** become **gray**.  
-- Each object has a **list of references**.  
-- The algorithm traverses the lists:  
-  - Objects in the list become **gray**,  
-  - When a list has been processed → the object becomes **black**.  
-- The process continues until all gray objects become **black**.  
-- The remaining white objects are garbage and are **freed from memory**.
+## 📋 Table of Contents
+1. [Core Concurrency](#1-core-concurrency)
+2. [Memory Management (GC)](#2-memory-management-gc)
+3. [Language Fundamentals](#3-language-fundamentals)
+4. [Junior Q&A Cheat Sheet](#4-junior-qa-cheat-sheet)
+5. [Networking (HTTP & gRPC)](#5-networking-http--grpc)
+6. [System Design & Infrastructure](#6-system-design--infrastructure)
+7. [Code Examples](#7-code-examples)
 
-### Other Concepts
-- An **interface** defines a set of method signatures, **without their implementation**.
-- Outside generics, **any** behaves exactly like interface{}:
-	- it can hold a value of any dynamic type.
- 	- You still need type assertions or type switches to work with the underlying concrete type.
-- Can an interface embed another interface in Go?
-	- Yes. In Go, an interface may embed zero or more other interfaces. The resulting interface’s method set is the union of all embedded interfaces’ methods
-  (duplicates with identical signatures are deduplicated).
-	- A type implements the composed interface if it implements all methods from that union.
-- A **pointer** refers to a **location in memory**.
-- In Go, everything is passed to functions **by value**.
-	- That means you always copy the argument.
-	- If the argument is a "handle" (e.g., a pointer, slice, map, channel, function, or interface),
- 		- you copy the handle itself, but it still points to the same underlying memory.
-- **var vs :=**
-	- Use := inside functions for short, local variables: concise, type inferred.
-	- Use var when you need a zero value, want to specify the type, or are at package scope.
+---
 
-### Generics in Go
-Since **Go 1.18**, the language supports **generics**.  
-They let you write functions and structs that operate on different types **without duplicating code**.
+## 1. Core Concurrency
 
-### Panic and Recover
-- `panic` stops the normal flow of the program.  
-- `recover` inside a `defer` catches the panic and lets you regain control.  
+### Concurrency vs. Parallelism
+- **Concurrency**: A technique for managing multiple tasks that are executed in an interleaved manner (often on a single processor).
+- **Parallelism**: Executing multiple tasks truly at the same time (on multiple cores or processors).
 
-**Defer** delays the execution of a function until the surrounding function returns.  
-  - It operates in **LIFO** (*Last In – First Out*) order.  
+### Goroutines & Channels
+- **Goroutines**:
+  - Lightweight "threads" managed by the Go runtime.
+  - Initial stack size is only **2 KB** (OS threads are several MB).
+  - Stacks are dynamic; they can grow and shrink as needed.
+- **Channels**: The primary way goroutines communicate.
+  - **Unbuffered**: Enforces a synchronous hand-off. Both sender and receiver block until the other is ready.
+  - **Buffered**: Queues up to `cap(ch)` values. Sends block only when full; receives block only when empty.
 
-### Context
-- Used to propagate timeouts, deadlines, cancellation, and metadata across goroutines.
-- The standard mechanism in Go for concurrency control.
+### The M:N Scheduler
+Go uses an **M:N scheduler** to map **M goroutines** onto **N OS threads**.
+- Each thread has a processor (**P**) with a **local run queue**.
+- **Work Stealing**: If a processor's local queue is empty, the scheduler steals work from other processors' queues to balance the load.
+- **Global Queue**: If local queues are full, goroutines are moved to a global queue.
 
-### Struct Embedding
-- Go doesn’t have classical inheritance, but it supports composition.
-- Embedding lets you use the fields and methods of the embedded struct directly.
+### Synchronization
+- **Waitgroup**: Used to wait for a collection of goroutines to finish.
+- **Mutex**: Prevents race conditions by ensuring only one goroutine can access a "critical section" of code at a time.
+- **RWMutex**: A read-write lock. Multiple goroutines can hold a read lock (`RLock`), but the write lock (`Lock`) is exclusive.
 
-### Slice
-- A slice is a dynamic view over an array — it has length and capacity.
-- It can grow using `append`.
+---
 
-### Map
-- A map is a key → value dictionary.
-- It is not concurrency-safe — use `sync.Mutex` or `sync.Map`.
+## 2. Memory Management (GC)
 
-# Junior Go Q&A (Cheat Sheet)
+Go uses a **Tri-color Mark and Sweep** garbage collector:
 
-* **When do you use a pointer receiver?**
-  When the method **mutates** the receiver, to **avoid copying** large structs, or to keep a **consistent method set**.
+1. **White**: Objects that are candidates for deletion.
+2. **Gray**: Objects reachable from roots but whose references haven't been scanned yet.
+3. **Black**: Reachable objects that have been fully scanned.
 
-* **What happens if you write to a nil map?**
-  It **panics**. Initialize first with `make(map[K]V)`.
+**The Process:**
+- Starts with all objects marked as **white**.
+- **Roots** (global variables, stack pointers) are marked **gray**.
+- The collector scans gray objects, marking their children as gray and moving the parent to **black**.
+- Once no gray objects remain, all remaining **white** objects are considered unreachable and are **freed**.
 
-* **How do you avoid goroutine leaks?**
-  Use **`context`** or **close a channel** that goroutines `select` on; ensure every **send has a receiver** (and vice‑versa).
+---
 
-* **How do you parse/emit JSON?**
-  `json.Unmarshal([]byte, &v)` and `json.Marshal(v)` (or `Encoder`/`Decoder`). Use tags like `json:"field,omitempty"`.
-  
-* **How do you set a timeout on an HTTP call?**
-  `ctx, cancel := context.WithTimeout(...); defer cancel()` and **pass `ctx`** to the request/client.
+## 3. Language Fundamentals
 
-* **Common for-loop gotcha with goroutines?**
-  **Capturing the loop variable** in a closure. Fix by **shadowing**: `v := v` inside the loop before launching the goroutine.
+### Types & Data Structures
+- **Interfaces**: Define a set of method signatures. A type implements an interface by implementing all its methods.
+  - Interfaces can **embed** other interfaces (the result is the union of their method sets).
+- **Slices**: A dynamic view over an underlying array. Contains `len`, `cap`, and a pointer to the data.
+- **Maps**: Key-value dictionaries. **Not concurrency-safe** (use `sync.Mutex` or `sync.Map` for concurrent access).
+- **Struct Embedding**: Go's way of composition (not classical inheritance). Fields and methods of embedded structs are "promoted" to the outer struct.
 
-* **Race detector?**
-  `go test -race` to catch **data races**.
+### Essential Concepts
+- **Pointers**: Refer to a specific location in memory.
+- **Pass by Value**: Everything in Go is passed by value.
+  - When passing a "handle" (pointer, slice, map, channel), you copy the handle, but it still points to the same underlying memory.
+- **Variable Declaration**:
+  - `:=` (Short declaration): Use inside functions for concise, type-inferred local variables.
+  - `var`: Use for zero-value initialization, explicit types, or package-level variables.
+- **Generics (Go 1.18+)**: Allows writing functions and structs that operate on different types without code duplication.
+- **Defer**: Delays execution until the surrounding function returns. Operates in **LIFO** (Last In, First Out) order.
+- **Panic & Recover**:
+  - `panic`: Stops normal execution.
+  - `recover`: Used inside a `defer` to catch a panic and regain control.
+- **Context**: Used to propagate timeouts, deadlines, cancellation signals, and metadata across goroutines.
 
-- **rate limiter**
-	- Think of a rate limiter as a bouncer: it controls how many “requests” get into your system over time so you don’t melt the servers or downstreams.
- 	- A rate limiter enforces a policy like “allow up to R requests per second, with at most B queued/burst at once.”
+---
 
+## 4. Junior Q&A Cheat Sheet
+
+| Question | Answer |
+| :--- | :--- |
+| **When to use a pointer receiver?** | When the method needs to mutate the receiver, to avoid copying large structs, or for consistency. |
+| **What happens if you write to a nil map?** | It **panics**. You must initialize it with `make(map[K]V)` first. |
+| **How to avoid goroutine leaks?** | Use `context` for timeouts or signals, and ensure every channel send has a matching receive. |
+| **How to handle JSON?** | Use `json.Marshal` and `json.Unmarshal`. Use struct tags like ``json:"field_name,omitempty"``. |
+| **How to set a timeout on HTTP?** | Create a `context.WithTimeout`, defer its `cancel()`, and pass it to the HTTP request. |
+| **Common loop/goroutine gotcha?** | Capturing the loop variable in a closure. Fix by shadowing: `v := v` inside the loop. |
+| **How to detect races?** | Run tests with the flag: `go test -race`. |
+
+---
+
+## 5. Networking (HTTP & gRPC)
 
 ### HTTP Methods
-- **GET / HEAD** — read-only; does not change state. `GET` returns the body; `HEAD` returns headers only.
-- **POST** — create/action; the server assigns an ID or there are side effects.
-- **PUT** — you know the resource URI; replace the entire resource (or upsert).
-- **PATCH** — modify part of the resource.
-- **DELETE** — remove a resource; repeating the call is safe (idempotent).
-- **OPTIONS** — CORS/preflight/discover supported methods.
+- **GET / HEAD**: Read-only. `GET` returns body; `HEAD` returns headers only.
+- **POST**: Create a resource or trigger an action (non-idempotent).
+- **PUT**: Replace/Upsert a resource at a specific URI.
+- **PATCH**: Partially modify a resource.
+- **DELETE**: Remove a resource (idempotent).
+- **OPTIONS**: Used for CORS preflight and discovering supported methods.
 
+### gRPC Overview
+- **Protocol Buffers**: IDL used to define services and messages.
+- **HTTP/2**: The underlying transport, supporting multiplexing and streaming.
+- **Interceptors**: Middleware for gRPC (Auth, Logging, Metrics, etc.).
 
-### gRPC: How It Works (Summary)
-- **IDL → code:** Define the API in `.proto`. `protoc` generates code in your chosen language (here: Go).
-- **Server:** The generator creates a server interface; you implement it, usually by embedding `Unimplemented<YourService>Server` to preserve backward compatibility when adding methods.
-- **Client:** The generator creates a client stub; you call gRPC methods like regular functions — unary and streaming (server, client, bidirectional).
-- **Transport:** HTTP/2, binary Protobuf, and a strongly typed contract on both sides.
+#### gRPC Streaming Types
+1. **Unary**: 1 Request ➡️ 1 Response.
+2. **Server-Streaming**: 1 Request ➡️ Stream of Responses.
+3. **Client-Streaming**: Stream of Requests ➡️ 1 Response.
+4. **Bidirectional**: Stream of Requests ↔️ Stream of Responses (Full-duplex).
 
-## gRPC Streaming Overview
+---
 
-* **Transport:** gRPC rides **HTTP/2**. Each RPC is a single HTTP/2 **stream** with: **headers (metadata) → messages (length‑prefixed protobuf frames) → trailers (status)**.
+## 6. System Design & Infrastructure
 
-* **RPC shapes:**
+### Scalability
+- **Horizontal Pod Autoscaling (HPA)**: Adding/removing pods based on metrics.
+- **Vertical Pod Autoscaling (VPA)**: Resizing pod CPU/Memory limits.
+- **Load Balancer**: Distributes traffic across multiple application instances.
+- **Ingress**: A K8s API object that manages external access to services, typically via HTTP/HTTPS routing rules.
 
-  * **Unary:** 1 req → 1 res
-  	* Unary RPCs where the client sends a single request to the server and gets a single response back, just like a normal function call.
-```go
-   rpc SayHello(HelloRequest) returns (HelloResponse);	
-```
-  * **Server‑streaming:** 1 req → many res
-  	* Server streaming RPCs where the client sends a request to the server and gets a stream to read a sequence of messages back.
-  	* The client reads from the returned stream until there are no more messages. gRPC guarantees message ordering within an individual RPC call.
-```go
-	rpc LotsOfReplies(HelloRequest) returns (stream HelloResponse);
-```
-  * **Client‑streaming:** many req → 1 res
-  	* Client streaming RPCs where the client writes a sequence of messages and sends them to the server, again using a provided stream.
-   	* Once the client has finished writing the messages, it waits for the server to read them and return its response.
-   	* Again gRPC guarantees message ordering within an individual RPC call.
-```go
-	rpc LotsOfGreetings(stream HelloRequest) returns (HelloResponse);
-```
+### Rate Limiting
+- Acts as a "bouncer" to protect downstream services.
+- Policies typically define "R requests per second with a burst of B."
 
-  * **Bidirectional:** many ↔ many (full‑duplex)
-  	* Bidirectional streaming RPCs where both sides send a sequence of messages using a read-write stream.
-   	* The two streams operate independently, so clients and servers can read and write in whatever order they like: for example, the server could wait to receive all the client messages before writing its responses, or it could alternately read a message then write a message, or some other combination of reads and writes.
-    * The order of messages in each stream is preserved.
-```go
-	rpc BidiHello(stream HelloRequest) returns (stream HelloResponse);
-```
+---
 
-* **Flow control / backpressure:** handled by **HTTP/2 windows**; in Go you feel it as blocking on `Send`/`Recv`.
+## 7. Code Examples
 
-* **Cancellation / deadlines:** propagate via `context.Context`.
+### Generic Thread-Safe Cache with TTL
+A basic in-memory key-value cache implementation using generics and a background cleanup janitor.
 
-* **Ordering:** messages are **in‑order** within an RPC. The **first error closes the stream**.
+<details>
+<summary><b>Click to view full implementation</b></summary>
 
-- **interceptors** are the “middleware” of gRPC. They let you run code before and after every RPC without touching your service handlers, so you can add auth, logging, metrics, rate-limiting, retries, tracing, etc., in one place.
-
-### Cache
-- A cache is a small, fast key→value store you put in front of a slower system (disk, DB, network, compiler, etc.) to serve repeated reads quicker.
 ```go
 package cache
 
@@ -199,7 +184,6 @@ type Cache[K comparable, V any] struct {
 }
 
 // New creates a new Cache instance.
-// Example: New[string,int](WithDefaultTTL(time.Minute), WithCleanupInterval(30*time.Second))
 func New[K comparable, V any](opts ...Option) *Cache[K, V] {
 	cfg := cacheConfig{}
 	for _, o := range opts {
@@ -225,13 +209,12 @@ func (c *Cache[K, V]) Close() {
 	<-c.doneCh
 }
 
-// Set adds or updates a key-value pair using the cache's default TTL (if any).
+// Set adds or updates a key-value pair using the cache's default TTL.
 func (c *Cache[K, V]) Set(key K, value V) {
 	c.SetWithTTL(key, value, c.defaultTTL)
 }
 
 // SetWithTTL adds or updates a key-value pair with a specific TTL.
-// ttl <= 0 means no expiration for this entry.
 func (c *Cache[K, V]) SetWithTTL(key K, value V, ttl time.Duration) {
 	var exp time.Time
 	if ttl > 0 {
@@ -243,9 +226,8 @@ func (c *Cache[K, V]) SetWithTTL(key K, value V, ttl time.Duration) {
 	c.mu.Unlock()
 }
 
-// Get retrieves the value by key. If the item is expired, it is removed and (zero,false) is returned.
+// Get retrieves the value by key.
 func (c *Cache[K, V]) Get(key K) (V, bool) {
-	// Fast path under read lock.
 	c.mu.RLock()
 	e, ok := c.items[key]
 	if !ok {
@@ -261,7 +243,7 @@ func (c *Cache[K, V]) Get(key K) (V, bool) {
 		return value, true
 	}
 
-	// Upgrade to write lock to delete if still expired.
+	// Double-check expiration under write lock
 	c.mu.Lock()
 	if e2, ok2 := c.items[key]; ok2 && !e2.expireAt.IsZero() && time.Now().After(e2.expireAt) {
 		delete(c.items, key)
@@ -272,14 +254,7 @@ func (c *Cache[K, V]) Get(key K) (V, bool) {
 	return zero, false
 }
 
-// Remove deletes the key-value pair with the specified key from the cache.
-func (c *Cache[K, V]) Remove(key K) {
-	c.mu.Lock()
-	delete(c.items, key)
-	c.mu.Unlock()
-}
-
-// Pop removes and returns the value associated with the key (if present and not expired).
+// Pop removes and returns the value.
 func (c *Cache[K, V]) Pop(key K) (V, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -299,8 +274,6 @@ func (c *Cache[K, V]) Pop(key K) (V, bool) {
 	delete(c.items, key)
 	return e.value, true
 }
-
-// ----- internals -----
 
 func (c *Cache[K, V]) startJanitor() {
 	c.stopCh = make(chan struct{})
@@ -333,17 +306,13 @@ func (c *Cache[K, V]) removeExpired() {
 	c.mu.Unlock()
 }
 ```
+</details>
 
-### Autoscaling
-- Horizontal autoscaling (HPA/KEDA): add/remove pods.
-- Vertical autoscaling (VPA): resize each pod’s CPU/memory.
-### Load Balancer
-- A Kubernetes load balancer service is a component that distributes network traffic across multiple instances of an application running in a K8S cluster
-![unnamed](https://github.com/user-attachments/assets/67e3d9eb-0bb5-4b65-9e7a-9a0007181c0f)
-	- **Ingress**:
- 		- Kubernetes also has an API object called Ingress.
-   		- Ingress is built on top of the Kubernetes Service (to expose Ingress, you need to use the Kubernetes Service).
-     	- The main responsibility of Ingress is distributing network traffic to services according to predetermined routing rules. 
-   
-### AWS
-https://aws.amazon.com/free/?trk=0a74b2b7-15b3-40f0-a1a9-39d406419e28&sc_channel=ps&ef_id=EAIaIQobChMI-
+---
+
+### External Resources
+- [AWS Free Tier](https://aws.amazon.com/free/)
+- [Go Documentation](https://golang.org/doc/)
+
+---
+*Maintained with ❤️ for the Go community.*
