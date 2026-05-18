@@ -138,12 +138,334 @@ type hchan struct {
 
 ---
 
-### Synchronization Primitives
-* **`sync.Mutex` Starvation Mode:**
-  * **Normal Mode:** Waiters are kept in a LIFO/FIFO queue, but newly active CPU goroutines also compete for the lock. New goroutines usually win because they are already on the CPU.
-  * **Starvation Mode:** If a waiter fails to acquire the Mutex for > **1ms**, the Mutex enters starvation mode. The lock is transferred **directly** to the front waiter. New arrivals do not spin or attempt to steal the lock; they immediately enqueue. This mitigates tail-latency spikes.
+### Buffered vs. Unbuffered Channels: Internal Mechanics & Trade-offs
+
+The core behavior of a Go channel is governed by whether it is **unbuffered** (capacity = 0) or **buffered** (capacity > 0).
+
+```mermaid
+graph TD
+    subgraph UC ["Unbuffered Channel (Sync Handoff)"]
+        SenderG[Sender Goroutine G1] -->|Blocks until Receiver ready| HchanSync[hchan Struct capacity=0]
+        HchanSync -->|Direct stack-to-stack copy| ReceiverG[Receiver Goroutine G2]
+    end
+
+    subgraph BC ["Buffered Channel (Async Ring Buffer)"]
+        SenderG2[Sender Goroutine G3] -->|Write & advance sendx| Buf[buf: Circular Ring Buffer]
+        Buf -->|Read & advance recvx| ReceiverG2[Receiver Goroutine G4]
+        style Buf fill:#FFF3E0,stroke:#FF9800,stroke-width:2px
+    end
+    
+    style SenderG fill:#00ADD8,stroke:#005F73,stroke-width:2px,color:#fff
+    style ReceiverG fill:#4CAF50,stroke:#2E7D32,stroke-width:2px,color:#fff
+    style SenderG2 fill:#00ADD8,stroke:#005F73,stroke-width:2px,color:#fff
+    style ReceiverG2 fill:#4CAF50,stroke:#2E7D32,stroke-width:2px,color:#fff
+    style HchanSync fill:#CFD8DC,stroke:#607D8B,stroke-width:2px,color:#000
+```
+
+#### 1. Unbuffered Channels (Synchronous Synchronization)
+* **Mechanics:** An unbuffered channel has **no internal storage buffer** (`dataqsiz == 0`, `buf == nil`).
+* **Handoff (Strict Synchronization):** Every send operation must block until a receiver is ready to read, and vice-versa. They act as a synchronization barrier.
+* **⚡ Legendary Runtime Optimization: Direct Stack-to-Stack Copy:**
+  If Goroutine $G_2$ (the receiver) is already blocked waiting for data in the `recvq` list:
+  1. The runtime bypasses the channel's `buf` ring buffer entirely.
+  2. The sender ($G_1$) writes the value **directly** into the memory address of the receiver's stack variable.
+  3. This is done via `runtime.memmove` under the protection of the channel lock.
+  4. **Why this rules:** This eliminates a memory copy (normally copying from sender stack $\rightarrow$ channel buffer $\rightarrow$ receiver stack) and bypasses acquiring the channel lock twice, dramatically improving throughput!
+
+#### 2. Buffered Channels (Asynchronous Queueing)
+* **Mechanics:** A buffered channel has an internal ring buffer (`dataqsiz > 0`, `buf` points to a block of memory).
+* **Decoupled Workflows:** The sender and receiver do not need to meet. The sender can send values until the buffer is full (`qcount == dataqsiz`), and only then does it block. The receiver can read values until the buffer is empty (`qcount == 0`), and only then does it block.
+* **Under-the-Hood Operations:**
+  * **Sending (`ch <- x`):**
+    1. Lock the `hchan` struct.
+    2. Check if a receiver is waiting in `recvq`. If yes, do a direct stack copy and unlock.
+    3. If buffer is not full, copy `x` into `buf[sendx]`, increment `sendx` (wrap around if it reaches the end of the array), increment `qcount`, and unlock.
+    4. If buffer is full, package the current Goroutine into a `sudog` struct, enqueue it in the `sendq` list, call `gopark()` to put the goroutine to sleep, and unlock.
+  * **Receiving (`<-ch`):**
+    1. Lock the `hchan` struct.
+    2. Check if a sender is waiting in `sendq`.
+       - If it's an unbuffered channel: Copy directly from sender's stack to receiver's stack, wake up the sender, unlock.
+       - If it's a buffered channel (buffer is full): Read from `buf[recvx]`, copy the blocked sender's value into the end of `buf`, advance indices, wake up the sender, unlock.
+    3. If buffer has elements, copy from `buf[recvx]`, increment `recvx`, decrement `qcount`, and unlock.
+    4. If buffer is empty, package the current Goroutine into a `sudog` struct, enqueue it in the `recvq` list, call `gopark()` to sleep, and unlock.
+
+---
+
+### 🚨 Race Conditions (Data Races)
+
+A **race condition** (specifically, a *data race* in Go) occurs when two or more goroutines concurrently access the same memory location, at least one of these accesses is a write, and there is no synchronization (e.g., mutexes, atomic operations, channels) to order the accesses.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor G1 as Goroutine 1
+    actor G2 as Goroutine 2
+    participant Mem as Shared Memory (Counter = 42)
+    
+    G1->>Mem: Read Counter (42)
+    G2->>Mem: Read Counter (42)
+    G1->>Mem: Increment & Write Counter (43)
+    G2->>Mem: Increment & Write Counter (43)
+    Note over Mem: Lost Update! Expected: 44, Actual: 43.
+```
+
+#### ❌ The Buggy Code (Concurrent Write Conflict)
+
+Here is a classic interview question displaying a severe data race. Run it with multiple workers, and the final count will be less than the target because updates are silently lost!
+
+```go
+package main
+
+import (
+	"fmt"
+	"sync"
+)
+
+func main() {
+	var count = 0
+	var wg sync.WaitGroup
+
+	for i := 0; i < 1000; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			count++ // ❌ DATA RACE! Read-modify-write is not atomic
+		}()
+	}
+
+	wg.Wait()
+	fmt.Printf("Final count: %d (Expected: 1000)\n", count)
+}
+```
+
+#### 🔍 How to Detect Races in Go: The Race Detector
+Go provides a built-in ThreadSanitizer-backed race detector. 
+* **Command:** `go test -race ./...` or `go run -race main.go`
+* **Under the Hood:** The compiler injects instrumentation at every read and write operation. It records the logical thread clock of accesses. If it detects overlapping unsynchronized access boundaries, it prints a detailed stack trace showing both memory operations.
+* **Performance Cost:** Enabling `-race` increases CPU overhead by **2x to 20x** and memory usage by **5x to 10x**. Do not use it in performance-critical production builds, but always use it in local testing and CI/CD pipelines!
+
+---
+
+### 🔒 Mutexes: Mutual Exclusion & sync.Mutex
+
+To prevent data races, Go offers `sync.Mutex` (Mutual Exclusion). It ensures that only one Goroutine can enter a critical section at any given time.
+
+#### 1. Internal Structure of `sync.Mutex`
+Under the hood (in `sync/mutex.go`), a Mutex is an extremely lightweight struct occupying just **8 bytes**:
+
+```go
+type Mutex struct {
+    state int32  // 32-bit state containing lock flags & waiter count
+    sema  uint32 // Semaphore for sleeping/waking blocked waiters
+}
+```
+
+The 32-bit `state` integer is bit-packed to avoid alignment overhead:
+* **Bit 0 (`mutexLocked`):** 1 if locked, 0 if free.
+* **Bit 1 (`mutexWoken`):** 1 if a sleeping waiter has been woken and is trying to acquire the lock.
+* **Bit 2 (`mutexStarving`):** 1 if the Mutex is operating in **Starvation Mode**.
+* **Bits 3-31 (`waitersCount`):** Count of goroutines currently queued up and blocked on the semaphore.
+
+```
++--------------------------------------+----+----+----+
+|             waitersCount             | star|woke|lock|
+|               (29 bits)              | (1) | (1) | (1)|
++--------------------------------------+----+----+----+
+ 31                                   3    2    1    0  (Bit indices)
+```
+
+#### 2. The Lock Path: Fast Path vs. Slow Path
+* **Fast Path (CAS Lock):** 
+  If the mutex is completely free (state is 0), the calling goroutine attempts to flip the `mutexLocked` bit to 1 using a single atomic Compare-And-Swap (`atomic.CompareAndSwapInt32`). If it succeeds, it returns immediately. This executes in a **single CPU instruction** (< 1ns).
+* **Slow Path (Spinning & Enqueueing):**
+  If CAS fails (already locked), the goroutine enters the slow path:
+  1. **Active Spinning:** If the goroutine is on a multi-core machine and the scheduler predicts the current owner will release the lock soon, it spins (executes a tight loop of `PAUSE` instructions) up to a limit, attempting to acquire the lock when released without leaving the CPU.
+  2. **Parking (Blocking):** If spinning is not allowed or fails, the goroutine increments `waitersCount`, registers itself on the lock's `sema` queue, and calls the runtime function `gopark()` to put itself to sleep, yielding its OS thread.
+
+#### 3. Normal Mode vs. Starvation Mode
+Go's Mutex is highly optimized to balance average throughput and worst-case latency.
+
+| Attribute | Normal Mode | Starvation Mode |
+| :--- | :--- | :--- |
+| **Priority** | Favors high overall **throughput**. Spawns CPU-level competition. | Protects tail-latency. Favors **fairness**. |
+| **New Goroutines** | Newly active CPU goroutines can steal the lock from queued waiters. | Blocked from stealing the lock. Must enqueue at the tail. |
+| **Hand-Off** | Woken waiter competes with incoming goroutines. Often loses. | Lock ownership is transferred **directly** to the first waiter. |
+| **Trigger** | Default mode of operation. | A waiter has failed to acquire the lock for $>1\text{ms}$. |
+
+```mermaid
+graph TD
+    subgraph NM ["Normal Mode (High Throughput)"]
+        NewG[New Goroutine on CPU] -->|Fights for lock| LockN{Lock}
+        WaiterG[Woken Waiter from Queue] -->|Fights for lock| LockN
+        LockN -->|New G usually wins| NewG
+    end
+
+    subgraph SM ["Starvation Mode (Fairness / Low Tail Latency)"]
+        NewG2[New Goroutine on CPU] -->|Directly Enqueued| Queue[Waiter Queue]
+        LockS{Lock} -->|Transferred Directly| FrontG[Front Waiter in Queue]
+    end
+    
+    style LockN fill:#FF9800,stroke:#E65100,stroke-width:2px,color:#fff
+    style LockS fill:#FF5722,stroke:#d03b0d,stroke-width:2px,color:#fff
+    style NewG fill:#00ADD8,stroke:#005F73,stroke-width:2px,color:#fff
+    style WaiterG fill:#4CAF50,stroke:#2E7D32,stroke-width:2px,color:#fff
+    style NewG2 fill:#00ADD8,stroke:#005F73,stroke-width:2px,color:#fff
+    style FrontG fill:#4CAF50,stroke:#2E7D32,stroke-width:2px,color:#fff
+```
+
+#### 4. Safe Code Example: Resolving the Data Race
+
+Using `sync.Mutex` to protect the critical read-modify-write block ensures data safety:
+
+```go
+package main
+
+import (
+	"fmt"
+	"sync"
+)
+
+type SafeCounter struct {
+	mu    sync.Mutex
+	count int
+}
+
+func (c *SafeCounter) Increment() {
+	c.mu.Lock()
+	defer c.mu.Unlock() // Always unlock inside a defer to prevent deadlocks on panics
+	c.count++
+}
+
+func (c *SafeCounter) Value() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.count
+}
+
+func main() {
+	counter := &SafeCounter{}
+	var wg sync.WaitGroup
+
+	for i := 0; i < 1000; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			counter.Increment()
+		}()
+	}
+
+	wg.Wait()
+	fmt.Printf("Final count: %d\n", counter.Value()) // Guaranteed: 1000
+}
+```
+
+> [!WARNING]
+> **Pro-Level Gotcha: Copying Mutexes is Catastrophic!**
+> A Mutex contains an internal state. If you pass a struct containing a Mutex by value (copying it), you copy the Mutex's state. If a locked Mutex is copied, the copy is also locked, leading to instant deadlocks.
+> * **Standard Practice:** Always pass structs containing Mutexes **by pointer** or make the receiver a pointer (e.g. `func (c *SafeCounter) ...`).
+
+---
+
+### 👥 Coordinating Workers with sync.WaitGroup
+
+`sync.WaitGroup` is a synchronization primitive used to block execution until a collection of concurrent goroutines have finished running.
+
+#### 1. Internal Structure of `sync.WaitGroup`
+A WaitGroup is defined as:
+
+```go
+type WaitGroup struct {
+    noCopy noCopy // Prevents copying by static checkers (go vet)
+    state  align64State // Bit-packed state representing wait count, waiter count, and sema
+}
+```
+
+* **Wait Counter (32 bits):** The number of active goroutines registered with `Add()`.
+* **Waiter Count (32 bits):** The number of goroutines blocked on `Wait()`.
+* **Semaphore (32 bits):** Used to wake up the goroutines blocked on `Wait()` when the wait counter drops to zero.
+
+#### 2. Operations & Lifecycle
+1. **`wg.Add(delta int)`:** Adds the delta (can be positive or negative) to the wait counter. If the wait counter becomes 0, all blocked goroutines waiting on `Wait()` are woken up via the internal semaphore. If the counter goes negative, the runtime triggers a panic.
+2. **`wg.Done()`:** Syntactic sugar for `wg.Add(-1)`.
+3. **`wg.Wait()`:** Blocks the calling goroutine. It checks if the wait counter is 0; if yes, it returns immediately. Otherwise, it increments the waiter count and sleeps on the semaphore.
+
+```mermaid
+stateDiagram-v2
+    [*] --> CounterZero : wg := sync.WaitGroup{}
+    CounterZero --> CounterPositive : wg.Add(3)
+    CounterPositive --> CounterPositive : wg.Done() (Counter = 2)
+    CounterPositive --> CounterPositive : wg.Done() (Counter = 1)
+    CounterPositive --> CounterZero : wg.Done() (Counter = 0)
+    CounterZero --> [*] : Wakes up all Waiters!
+```
+
+#### 3. Production-Ready Code Example
+
+```go
+package main
+
+import (
+	"fmt"
+	"net/http"
+	"sync"
+	"time"
+)
+
+func fetchStatus(url string, wg *sync.WaitGroup) {
+	defer wg.Done() // Guaranteed to decrease counter on return
+
+	client := http.Client{Timeout: 2 * time.Second}
+	resp, err := client.Get(url)
+	if err != nil {
+		fmt.Printf("❌ %s is down: %v\n", url, err)
+		return
+	}
+	defer resp.Body.Close()
+	fmt.Printf("✅ %s returned HTTP %d\n", url, resp.StatusCode)
+}
+
+func main() {
+	urls := []string{
+		"https://golang.org",
+		"https://go.dev",
+		"https://github.com",
+	}
+
+	var wg sync.WaitGroup
+
+	for _, url := range urls {
+		wg.Add(1) // Increment counter BEFORE spawning
+		go fetchStatus(url, &wg) // Pass WaitGroup as a pointer!
+	}
+
+	fmt.Println("Waiting for all lookups to complete...")
+	wg.Wait() // Blocks until counter returns to 0
+	fmt.Println("All lookups finished!")
+}
+```
+
+#### 4. The 4 Ultimate WaitGroup Pitfalls (High-Yield Interview Content)
+
+> [!CAUTION]
+> Junior developers break these constantly. Senior candidates are expected to spot them in 2 seconds:
+
+1. **❌ Spawning before Adding:** Calling `wg.Add(1)` inside the spawned goroutine rather than before it.
+   * *Why:* The parent goroutine can reach `wg.Wait()` before the spawned goroutines are scheduled and call `Add(1)`. The parent will read a counter of 0, assume work is done, and exit immediately!
+   * *Fix:* **Always call `Add()` before executing `go worker()`**.
+2. **❌ Copying by Value:** Passing `wg` by value into functions (e.g., `func worker(wg sync.WaitGroup)`).
+   * *Why:* It duplicates the internal state. The spawned goroutine calls `Done()` on the copy, which has no effect on the parent's `wg`. The parent blocks forever (deadlock).
+   * *Fix:* **Always pass the WaitGroup by pointer (`*sync.WaitGroup`)**.
+3. **❌ Negative Counter Panic:** Calling `wg.Done()` more times than `wg.Add(1)` was called.
+   * *Why:* Triggers an instant, non-recoverable runtime panic: `panic: sync: negative WaitGroup counter`.
+   * *Fix:* Ensure `wg.Done()` matches `wg.Add()` exactly, often using `defer wg.Done()`.
+4. **❌ Concurrent Re-use:** Calling `wg.Add()` concurrently while `wg.Wait()` is already blocking.
+   * *Why:* Causes a race condition and potential panic or deadlock. A WaitGroup can only be reused once all previous waiters have exited `Wait()`.
+
+---
+
+### 🤓 Advanced Synchronization: RWMutex & sync.Map
+
 * **`sync.RWMutex`:** A reader-writer lock. Multiple readers can hold the read lock (`RLock`), but the write lock (`Lock`) is completely exclusive. To prevent writer starvation, new readers are blocked if a writer is already waiting.
-* **`sync.WaitGroup`:** Atomic uint64 counter. Two 32-bit halves (on 32-bit platforms) or a uint64 representing the wait count and the waiter count. Manipulated atomically.
 * **`sync.Map`:** Specialized concurrent map optimized for two cases:
   1. Read-heavy workloads where keys don't change frequently.
   2. Disjoint concurrent writes (different keys written by different goroutines).
