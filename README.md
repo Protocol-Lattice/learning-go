@@ -2,7 +2,6 @@
 
 [![Go Version](https://img.shields.io/badge/Go-1.22+-00ADD8?style=for-the-badge&logo=go&logoColor=white)](https://go.dev/)
 [![Interview Ready](https://img.shields.io/badge/Interview-Ready-FF5722?style=for-the-badge&logo=rocket&logoColor=white)](https://github.com/Protocol-Lattice/golang-interview-prep-in-english)
-[![Aesthetics](https://img.shields.io/badge/Design-Premium--High--Yield-4CAF50?style=for-the-badge)](https://github.com/Protocol-Lattice/golang-interview-prep-in-english)
 
 Welcome to the **Ultimate Go Interview Preparation Guide & Cheat Sheet**. This reference has been meticulously designed and engineered to serve as a high-density, easily skimmable, and visually rich reference during live technical screens, system design rounds, or rapid pre-interview revision. 
 
