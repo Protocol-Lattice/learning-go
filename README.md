@@ -150,56 +150,29 @@ type hchan struct {
 
 ---
 
-### Buffered vs. Unbuffered Channels: Internal Mechanics & Trade-offs
+### Buffered vs. Unbuffered Channels
 
-The core behavior of a Go channel is governed by whether it is **unbuffered** (capacity = 0) or **buffered** (capacity > 0). Channels safely communicate goroutines: unbuffered channels only complete the send operation when a receiver actually reads the sender's data, while buffered channels can receive values continuously until the buffer capacity is full.
+#### Buffered Channels
 
-```mermaid
-graph TD
-    subgraph UC ["Unbuffered Channel (Sync Handoff)"]
-        SenderG[Sender Goroutine G1] -->|Blocks until Receiver ready| HchanSync[hchan Struct capacity=0]
-        HchanSync -->|Direct stack-to-stack copy| ReceiverG[Receiver Goroutine G2]
-    end
+A buffered channel allows sending values without an immediate receiver until the buffer is full.
 
-    subgraph BC ["Buffered Channel (Async Ring Buffer)"]
-        SenderG2[Sender Goroutine G3] -->|Write & advance sendx| Buf[buf: Circular Ring Buffer]
-        Buf -->|Read & advance recvx| ReceiverG2[Receiver Goroutine G4]
-        style Buf fill:#FFF3E0,stroke:#FF9800,stroke-width:2px
-    end
-    
-    style SenderG fill:#00ADD8,stroke:#005F73,stroke-width:2px,color:#fff
-    style ReceiverG fill:#4CAF50,stroke:#2E7D32,stroke-width:2px,color:#fff
-    style SenderG2 fill:#00ADD8,stroke:#005F73,stroke-width:2px,color:#fff
-    style ReceiverG2 fill:#4CAF50,stroke:#2E7D32,stroke-width:2px,color:#fff
-    style HchanSync fill:#CFD8DC,stroke:#607D8B,stroke-width:2px,color:#000
+* Sender blocks only when the buffer is full
+* Receiver blocks only when the buffer is empty
+
+```go
+ch := make(chan int, 3) // buffer holds up to 3 values
 ```
 
-#### 1. Unbuffered Channels (Synchronous Synchronization)
-* **Mechanics:** An unbuffered channel has **no internal storage buffer** (`dataqsiz == 0`, `buf == nil`).
-* **Handoff (Strict Synchronization):** Every send operation must block until a receiver is ready to read, and vice-versa. They act as a synchronization barrier.
-* **⚡ Legendary Runtime Optimization: Direct Stack-to-Stack Copy:**
-  If Goroutine $G_2$ (the receiver) is already blocked waiting for data in the `recvq` list:
-  1. The runtime bypasses the channel's `buf` ring buffer entirely.
-  2. The sender ($G_1$) writes the value **directly** into the memory address of the receiver's stack variable.
-  3. This is done via `runtime.memmove` under the protection of the channel lock.
-  4. **Why this rules:** This eliminates a memory copy (normally copying from sender stack $\rightarrow$ channel buffer $\rightarrow$ receiver stack) and bypasses acquiring the channel lock twice, dramatically improving throughput!
+#### Unbuffered Channels
 
-#### 2. Buffered Channels (Asynchronous Queueing)
-* **Mechanics:** A buffered channel has an internal ring buffer (`dataqsiz > 0`, `buf` points to a block of memory).
-* **Decoupled Workflows:** The sender and receiver do not need to meet. The sender can send values until the buffer is full (`qcount == dataqsiz`), and only then does it block. The receiver can read values until the buffer is empty (`qcount == 0`), and only then does it block.
-* **Under-the-Hood Operations:**
-  * **Sending (`ch <- x`):**
-    1. Lock the `hchan` struct.
-    2. Check if a receiver is waiting in `recvq`. If yes, do a direct stack copy and unlock.
-    3. If buffer is not full, copy `x` into `buf[sendx]`, increment `sendx` (wrap around if it reaches the end of the array), increment `qcount`, and unlock.
-    4. If buffer is full, package the current Goroutine into a `sudog` struct, enqueue it in the `sendq` list, call `gopark()` to put the goroutine to sleep, and unlock.
-  * **Receiving (`<-ch`):**
-    1. Lock the `hchan` struct.
-    2. Check if a sender is waiting in `sendq`.
-       - If it's an unbuffered channel: Copy directly from sender's stack to receiver's stack, wake up the sender, unlock.
-       - If it's a buffered channel (buffer is full): Read from `buf[recvx]`, copy the blocked sender's value into the end of `buf`, advance indices, wake up the sender, unlock.
-    3. If buffer has elements, copy from `buf[recvx]`, increment `recvx`, decrement `qcount`, and unlock.
-    4. If buffer is empty, package the current Goroutine into a `sudog` struct, enqueue it in the `recvq` list, call `gopark()` to sleep, and unlock.
+An unbuffered channel has no storage. A send and receive must happen at the same time.
+
+* Sender blocks until a receiver is ready
+* Receiver blocks until a sender is ready
+
+```go
+ch := make(chan int) // no buffer
+```
 
 ---
 
