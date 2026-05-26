@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"fmt"
+	"time"
 )
 
 func main() {
@@ -15,5 +17,27 @@ func main() {
 		println("Context cancelled")
 		value := ctx.Value("key")
 		println("Value from context:", value.(int))
+	}
+
+	ctx2, cancel := context.WithDeadline(context.Background(), time.Now().Add(2*time.Second))
+	cancel() // cancel before deadline
+
+	select {
+	case <-ctx2.Done():
+		if ctx2.Err() != context.DeadlineExceeded {
+			fmt.Printf("expected DeadlineExceeded, got %v\n", ctx2.Err())
+		}
+
+	case <-time.After(200 * time.Millisecond):
+		fmt.Println("context deadline did not trigger")
+	}
+
+	ctx3, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	cancel()
+	select {
+	case <-ctx3.Done():
+		if ctx3.Err() != context.DeadlineExceeded {
+			fmt.Printf("expected DeadlineExceeded, got %v\n", ctx3.Err())
+		}
 	}
 }
