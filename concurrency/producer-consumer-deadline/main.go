@@ -31,7 +31,7 @@ func producer(ctx context.Context, ch chan<- int, wg *sync.WaitGroup, index int)
 	}
 }
 
-func consumer(ch <-chan int, wg *sync.WaitGroup, mu sync.Mutex, values *[]int) {
+func consumer(ch <-chan int, wg *sync.WaitGroup, mu *sync.Mutex, values *[]int) {
 	defer wg.Done()
 
 	for v := range ch {
@@ -56,7 +56,7 @@ func main() {
 	for i := 0; i < 10; i++ {
 		wp.Add(1)
 
-		go consumer(ch, &wp, mu, &values)
+		go consumer(ch, &wp, &mu, &values)
 	}
 	wg.Wait()
 	close(ch)
