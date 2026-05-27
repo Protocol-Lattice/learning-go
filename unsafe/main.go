@@ -1,42 +1,38 @@
 package main
 
-import "fmt"
-
-const chunkSize = 1024
-
-type arenaChunk[T any] struct {
-	data []T
-	used int
-}
-
 type MemoryArena[T any] struct {
-	chunks  []arenaChunk[T]
-	current int
+	buffer []T
+	offset int
 }
 
-func NewMemoryArena[T any]() *MemoryArena[T] {
-	return &MemoryArena[T]{
-		chunks: []arenaChunk[T]{
-			{data: make([]T, chunkSize)},
-		},
-	}
+func NewMemoryArena[T any](size int) *MemoryArena[T] {
+	return &MemoryArena[T]{buffer: make([]T, size)}
 }
 
-func (a *MemoryArena[T]) Alloc(data T) *T {
-	chunk := &a.chunks[a.current]
-	if chunk.used == len(chunk.data) {
-		a.chunks = append(a.chunks, arenaChunk[T]{data: make([]T, chunkSize)})
-		a.current++
-		chunk = &a.chunks[a.current]
+func (a *MemoryArena[T]) Allocate(obj T) *T {
+	if a.offset >= len(a.buffer) {
+		panic("out of memory")
 	}
-	chunk.data[chunk.used] = data
-	ptr := &chunk.data[chunk.used]
-	chunk.used++
-	return ptr
+	a.buffer[a.offset] = obj
+	p := &a.buffer[a.offset]
+	a.offset++
+	return p
+}
+
+func (a *MemoryArena[T]) Reset() {
+	a.offset = 0
+	// Optional: zero entries so the GC can collect anything they referenced.
+	// Only matters if T contains pointers.
+	var zero T
+	for i := range a.buffer {
+		a.buffer[i] = zero
+	}
 }
 
 func main() {
-	arena := NewMemoryArena[int]()
-	ptr := arena.Alloc(42)
-	fmt.Println(*ptr) // 42
+	arena := NewMemoryArena[int](10)
+	num := arena.Allocate(8)
+	println(*num) // 8
+	arena.Reset()
+	println(*num) // 0 (after reset, the memory is zeroed out)
 }
