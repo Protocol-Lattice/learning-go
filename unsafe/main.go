@@ -1,45 +1,42 @@
 package main
 
-import "sync"
-
 type MemoryArena[T any] struct {
+	offset uintptr
 	buffer []T
-	offset int
-	mu     sync.Mutex
 }
 
 func NewMemoryArena[T any](size int) *MemoryArena[T] {
-	return &MemoryArena[T]{buffer: make([]T, size), mu: sync.Mutex{}}
-}
-
-func (a *MemoryArena[T]) Alloc(obj T) *T {
-	defer a.mu.Unlock()
-	a.mu.Lock()
-	if a.offset >= len(a.buffer) {
-		panic("out of memory")
+	return &MemoryArena[T]{
+		offset: 0,
+		buffer: make([]T, size),
 	}
-	a.buffer[a.offset] = obj
-	p := &a.buffer[a.offset]
-	a.offset++
-	return p
 }
 
-func (a *MemoryArena[T]) Reset() {
-	defer a.mu.Unlock()
-	a.mu.Lock()
-	a.offset = 0
-	// Optional: zero entries so the GC can collect anything they referenced.
-	// Only matters if T contains pointers.
+func (arena *MemoryArena[T]) Alloc(obj T) *T {
+	if arena.offset >= uintptr(len(arena.buffer)) {
+		panic("MemoryArena: Out of memory")
+	}
+	arena.buffer[arena.offset] = obj
+	allocated := &arena.buffer[arena.offset]
+	arena.offset++
+	return allocated
+}
+
+func (arena *MemoryArena[T]) Reset() {
+	arena.offset = 0
 	var zero T
-	for i := range a.buffer {
-		a.buffer[i] = zero
+	for i := range arena.buffer {
+		arena.buffer[i] = zero
 	}
 }
 
 func main() {
 	arena := NewMemoryArena[int](10)
-	num := arena.Alloc(8)
-	println(*num) // 8
+
+	allocated := arena.Alloc(10)
+	println(*allocated)
+
 	arena.Reset()
-	println(*num) // 0 (after reset, the memory is zeroed out)
+	println(*allocated)
+
 }
