@@ -1,11 +1,16 @@
 package main
 
+type MemoryArenaInterface[T any] interface {
+	Alloc(obj T) *T
+	Reset()
+}
+
 type MemoryArena[T any] struct {
 	offset uintptr
 	buffer []T
 }
 
-func NewMemoryArena[T any](size int) *MemoryArena[T] {
+func NewMemoryArena[T any](size int) MemoryArenaInterface[T] {
 	return &MemoryArena[T]{
 		offset: 0,
 		buffer: make([]T, size),
