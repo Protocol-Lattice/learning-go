@@ -6,35 +6,28 @@ import (
 	"time"
 )
 
-func worker(id int) {
-	fmt.Println("started worker:", id)
+func job(id int) {
+	fmt.Println("start:", id)
 	time.Sleep(time.Second)
-	fmt.Println("finished worker:", id)
+	fmt.Println("done:", id)
 }
 
 func main() {
-	const maxConcurrent = 3
-
+	maxConcurrent := 4
 	sem := make(chan struct{}, maxConcurrent)
+	ticker := time.NewTicker(200 * time.Millisecond)
 	var wg sync.WaitGroup
 
-	for i := 1; i <= 10; i++ {
+	defer ticker.Stop()
+	for i := 0; i < 36; i++ {
+		<-ticker.C
 		wg.Add(1)
-
 		go func(id int) {
 			defer wg.Done()
-
-			// acquire semaphore slot
 			sem <- struct{}{}
+			defer func() { <-sem }()
 
-			// release semaphore slot
-			defer func() {
-				<-sem
-			}()
-
-			worker(id)
+			job(id)
 		}(i)
 	}
-
-	wg.Wait()
 }
